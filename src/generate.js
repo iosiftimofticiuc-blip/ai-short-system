@@ -178,8 +178,9 @@ async function generateVoiceover(script, sessionId) {
 // ─── STEP 3: GENERATE WORD-LEVEL SUBTITLES (SRT) ───────────────────────
 // Whisper constraint: `timestamp_granularities: ["word"]` REQUIRES
 // `response_format: "verbose_json"`. We then build SRT ourselves with
-// 3 words per cue for viral-style karaoke pacing.
-const WORDS_PER_CUE = 3;
+// 2 words per cue for viral-style karaoke pacing (guaranteed one line,
+// max punch).
+const WORDS_PER_CUE = 2;
 
 function formatSrtTime(sec) {
   const h = Math.floor(sec / 3600);
@@ -194,17 +195,26 @@ function buildSrtFromWords(words, wordsPerCue = WORDS_PER_CUE) {
   if (!Array.isArray(words) || words.length === 0) {
     throw new Error("Whisper returned no word-level timestamps");
   }
-  const cues = [];
+  // First pass: build raw cues.
+  const raw = [];
   for (let i = 0; i < words.length; i += wordsPerCue) {
     const chunk = words.slice(i, i + wordsPerCue);
-    const start = chunk[0].start;
-    const end = chunk[chunk.length - 1].end;
-    // Uppercase for viral punch
-    const text = chunk.map(w => w.word.trim()).join(" ").toUpperCase();
-    cues.push(
-      `${cues.length + 1}\n${formatSrtTime(start)} --> ${formatSrtTime(end)}\n${text}\n`
-    );
+    raw.push({
+      start: chunk[0].start,
+      end: chunk[chunk.length - 1].end,
+      text: chunk.map(w => w.word.trim()).join(" ").toUpperCase(),
+    });
   }
+  // Second pass: extend each cue's end to the next cue's start so no
+  // frame is left without a caption (eliminates flicker between words).
+  // Cap the stretch at 1s per cue to avoid a long tail hanging after the
+  // last word if there's silence at the end.
+  const MAX_STRETCH = 1.0;
+  const cues = raw.map((cue, idx) => {
+    const nextStart = raw[idx + 1]?.start ?? (cue.end + MAX_STRETCH);
+    const stretchedEnd = Math.min(nextStart, cue.end + MAX_STRETCH);
+    return `${idx + 1}\n${formatSrtTime(cue.start)} --> ${formatSrtTime(stretchedEnd)}\n${cue.text}\n`;
+  });
   return cues.join("\n");
 }
 
@@ -292,7 +302,7 @@ async function assembleVideo(audioPath, srtPath, audioDuration, sessionId, topic
     "OutlineColour=&H00000000",
     "BorderStyle=1",
     "Outline=4",
-    "Shadow=2",
+    "Shadow=0",
     "Alignment=2",
     "MarginV=85",
     "Bold=1",
