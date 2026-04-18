@@ -283,3 +283,5 @@ După 2 săptămâni de rulare:
 4. **Luna 3+:** când ai 1K-10K followeri, sponsorizări direct + TikTok Creativity Program
 
 **Pentru întrebări specifice de implementare, întreabă în chat. Codul e gata — doar setup-ul mai rămâne.**
+ 
+ 
