@@ -319,27 +319,142 @@ function cleanup(sessionId) {
   log(`Cleaned ${tempFiles.length} temp files`);
 }
 
+// ─── RESUME HELPERS ────────────────────────────────────────────────────
+// Resume mode re-uses already-paid artifacts (images + audio) from a prior
+// run that failed mid-pipeline. Saves ~$0.40 per retry.
+function parseResumeArg() {
+  for (const arg of process.argv.slice(2)) {
+    if (arg === "--resume") return { mode: "auto" };
+    if (arg.startsWith("--resume=")) return { mode: "explicit", id: arg.slice(9) };
+  }
+  return null;
+}
+
+function findLatestSessionInTemp() {
+  if (!fs.existsSync(CONFIG.tempDir)) return null;
+  const candidates = fs.readdirSync(CONFIG.tempDir)
+    .filter(f => f.endsWith("_img_0.png"))
+    .map(f => ({
+      id: f.slice(0, -"_img_0.png".length),
+      mtime: fs.statSync(path.join(CONFIG.tempDir, f)).mtime,
+    }))
+    .sort((a, b) => b.mtime - a.mtime);
+  return candidates[0]?.id || null;
+}
+
+// When the package JSON was never saved (pre-fix runs), rebuild topic +
+// captions from the audio transcript with one cheap Claude call.
+async function reconstructPkgFromAudio(audioPath) {
+  log("  No cached pkg.json — reconstructing from audio transcript...");
+  const transcript = await openai.audio.transcriptions.create({
+    file: fs.createReadStream(audioPath),
+    model: "whisper-1",
+    response_format: "text",
+  });
+  const script = String(transcript).trim();
+
+  const prompt = `Given the transcript of a short viral video about ${CONFIG.niche}, produce the publishing metadata.
+
+Transcript:
+"""
+${script}
+"""
+
+Return STRICT JSON (no markdown, no commentary):
+{
+  "topic": "Short specific title derived from the transcript",
+  "platforms": {
+    "tiktok":    { "caption": "...", "hashtags": ["#fyp","#psychology","..." ] },
+    "youtube":   { "title": "SEO title max 60 chars", "description": "Hook-first description", "tags": ["10-15 SEO tags"] },
+    "instagram": { "caption": "...", "hashtags": ["#reels", "20-30 mixed popularity"] },
+    "facebook":  { "caption": "Conversational, ends with a question" }
+  }
+}`;
+
+  const res = await claude.messages.create({
+    model: CONFIG.models.claude,
+    max_tokens: 2000,
+    messages: [{ role: "user", content: prompt }],
+  });
+  let text = res.content[0].text.trim()
+    .replace(/^```(?:json)?\n?/i, "")
+    .replace(/\n?```$/, "");
+  const meta = JSON.parse(text);
+  return { topic: meta.topic, script, imagePrompts: [], platforms: meta.platforms };
+}
+
+async function loadResumeState(resumeArg) {
+  const sessionId = resumeArg.mode === "explicit"
+    ? resumeArg.id
+    : findLatestSessionInTemp();
+  if (!sessionId) throw new Error("No resumable session found in temp/");
+
+  // Collect images
+  const imagePaths = [];
+  for (let i = 0; i < 10; i++) {
+    const p = path.join(CONFIG.tempDir, `${sessionId}_img_${i}.png`);
+    if (!fs.existsSync(p)) break;
+    imagePaths.push(p);
+  }
+  if (imagePaths.length === 0) throw new Error(`No images for session ${sessionId}`);
+
+  // Require audio
+  const audioPath = path.join(CONFIG.tempDir, `${sessionId}_voice.mp3`);
+  if (!fs.existsSync(audioPath)) throw new Error(`No audio for session ${sessionId}`);
+  const duration = parseFloat(
+    execSync(`ffprobe -v error -show_entries format=duration -of csv=p=0 "${audioPath}"`)
+      .toString().trim()
+  );
+
+  // Load or reconstruct pkg
+  const pkgPath = path.join(CONFIG.tempDir, `${sessionId}_pkg.json`);
+  let pkg;
+  if (fs.existsSync(pkgPath)) {
+    pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8"));
+    log("  Loaded cached pkg.json");
+  } else {
+    pkg = await reconstructPkgFromAudio(audioPath);
+  }
+
+  return { sessionId, pkg, imagePaths, audioPath, duration };
+}
+
 // ─── MAIN ──────────────────────────────────────────────────────────────
 async function main() {
   ensureDirs();
-  const sessionId = crypto.randomBytes(4).toString("hex");
-  log(`════ NEW SESSION ${sessionId} ════`);
-  
+  const resumeArg = parseResumeArg();
+
+  let sessionId, pkg, imagePaths, audioPath, duration;
+
   try {
     const history = loadHistory();
-    
-    // 1. Claude: full content package
-    const pkg = await generateContentPackage(history.topics);
-    
-    // 2. DALL-E: images
-    const imagePaths = await generateImages(pkg.imagePrompts, sessionId);
-    
-    // 3. OpenAI TTS: voice
-    const { audioPath, duration } = await generateVoiceover(pkg.script, sessionId);
-    
+
+    if (resumeArg) {
+      log(`════ RESUME MODE (${resumeArg.mode}) ════`);
+      ({ sessionId, pkg, imagePaths, audioPath, duration } = await loadResumeState(resumeArg));
+      log(`Resumed session ${sessionId}: topic="${pkg.topic}", ${imagePaths.length} images, ${duration.toFixed(2)}s audio`);
+    } else {
+      sessionId = crypto.randomBytes(4).toString("hex");
+      log(`════ NEW SESSION ${sessionId} ════`);
+
+      // 1. Claude: full content package
+      pkg = await generateContentPackage(history.topics);
+      // Persist pkg early so a later failure can resume without paying Claude again
+      fs.writeFileSync(
+        path.join(CONFIG.tempDir, `${sessionId}_pkg.json`),
+        JSON.stringify(pkg, null, 2)
+      );
+
+      // 2. DALL-E: images
+      imagePaths = await generateImages(pkg.imagePrompts, sessionId);
+
+      // 3. OpenAI TTS: voice
+      ({ audioPath, duration } = await generateVoiceover(pkg.script, sessionId));
+    }
+
     // 4. Whisper: subtitles
     const srtPath = await generateSubtitles(audioPath, sessionId);
-    
+
     // 5. FFmpeg: final video
     const videoPath = await assembleVideo(imagePaths, audioPath, srtPath, duration, sessionId, pkg.topic);
     
