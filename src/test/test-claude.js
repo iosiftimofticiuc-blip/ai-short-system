@@ -11,7 +11,7 @@ const Anthropic = require("@anthropic-ai/sdk");
   
   try {
     const response = await claude.messages.create({
-      model: "claude-opus-4-5",
+      model: "claude-opus-4-7",
       max_tokens: 200,
       messages: [{
         role: "user",

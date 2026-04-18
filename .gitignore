@@ -5,5 +5,9 @@ output/*.json
 temp/
 logs/*.log
 config/history.json
+background/*.mp4
+background/*.mov
+background/*.mkv
+background/*.webm
 .DS_Store
 *.log

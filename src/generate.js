@@ -1,15 +1,20 @@
 /**
  * AI SHORTS GENERATOR — Psychology & Science Facts
  * ════════════════════════════════════════════════════════════════════
- * 
+ *
  * Pipeline:
- *   1. Claude     → Picks viral topic + writes script + image prompts
- *   2. DALL-E 3   → Generates 5 cinematic 9:16 images
- *   3. OpenAI TTS → Converts script to natural voiceover
- *   4. FFmpeg     → Assembles video with subtitles, music, transitions
- *   5. Output     → MP4 ready for publishing
- * 
- * Usage: node src/generate.js
+ *   1. Claude     → Viral topic + ~170-word script + platform captions
+ *   2. OpenAI TTS → Natural voiceover (voice "onyx", 1.05x pace)
+ *   3. Whisper    → Word-level timestamps → tight karaoke-style SRT
+ *   4. FFmpeg     → Random segment from background/*.mp4 (gameplay loop),
+ *                   center-cropped to 1080x1920, muted, voice + subtitles
+ *                   burned on top
+ *   5. Output     → MP4 ready for publishing on 4 platforms
+ *
+ * Usage:
+ *   node src/generate.js                   # fresh run
+ *   node src/generate.js --resume          # reuse latest aborted session
+ *   node src/generate.js --resume=<id>     # reuse specific session
  */
 
 require("dotenv").config();
@@ -17,7 +22,6 @@ const Anthropic = require("@anthropic-ai/sdk");
 const OpenAI = require("openai");
 const fs = require("fs");
 const path = require("path");
-const axios = require("axios");
 const { execSync } = require("child_process");
 const crypto = require("crypto");
 
@@ -26,21 +30,24 @@ const CONFIG = {
   outputDir: path.resolve(__dirname, "../output"),
   tempDir: path.resolve(__dirname, "../temp"),
   logsDir: path.resolve(__dirname, "../logs"),
+  backgroundDir: path.resolve(__dirname, "../background"),
   historyFile: path.resolve(__dirname, "../config/history.json"),
-  
+
   niche: process.env.NICHE || "Psychology and Science Facts",
   voice: process.env.VOICE || "onyx",
-  
+
   video: {
     width: 1080,
     height: 1920,
     fps: 30,
-    imageDurationSec: 4, // 5 imagini × 4 sec = 20 sec... ajustam dinamic
   },
-  
+
+  // Target ~62s voiceover: long enough for TikTok Creativity Program
+  // (>60s), short enough for all Shorts/Reels platforms.
+  scriptWordTarget: 170,
+
   models: {
     claude: "claude-opus-4-7",
-    dalle: "dall-e-3",
     tts: "tts-1-hd",
   },
 };
@@ -72,18 +79,8 @@ const loadHistory = () => {
 
 const saveHistory = (h) => fs.writeFileSync(CONFIG.historyFile, JSON.stringify(h, null, 2));
 
-const downloadFile = async (url, dest) => {
-  const response = await axios.get(url, { responseType: "stream" });
-  const writer = fs.createWriteStream(dest);
-  response.data.pipe(writer);
-  return new Promise((resolve, reject) => {
-    writer.on("finish", resolve);
-    writer.on("error", reject);
-  });
-};
-
 const ffmpeg = (cmd) => {
-  log(`FFmpeg: ${cmd.substring(0, 100)}...`, "DEBUG");
+  log(`FFmpeg: ${cmd.substring(0, 120)}...`, "DEBUG");
   try {
     execSync(`ffmpeg -y -loglevel error ${cmd}`, { stdio: "pipe" });
   } catch (err) {
@@ -92,51 +89,50 @@ const ffmpeg = (cmd) => {
   }
 };
 
-// ─── STEP 1: CLAUDE GENERATES EVERYTHING ───────────────────────────────
-async function generateContentPackage(usedTopics) {
-  log("Step 1/5: Claude generates content package...");
-  
-  const prompt = `You are a viral short-form content expert specializing in ${CONFIG.niche} for TikTok, YouTube Shorts, Instagram Reels.
+const ffprobeDuration = (filePath) => parseFloat(
+  execSync(`ffprobe -v error -show_entries format=duration -of csv=p=0 "${filePath}"`)
+    .toString().trim()
+);
 
-TASK: Create a complete viral video package for a 50-60 second short video.
+// ─── STEP 1: CLAUDE GENERATES CONTENT PACKAGE ──────────────────────────
+async function generateContentPackage(usedTopics) {
+  log("Step 1/4: Claude generates content package...");
+
+  const prompt = `You are a viral short-form content expert specializing in ${CONFIG.niche} for TikTok, YouTube Shorts, Instagram Reels, Facebook Reels.
+
+TASK: Create a complete viral video package. The video will use GAMEPLAY FOOTAGE (Minecraft parkour / Subway Surfers style) as the visual — your job is the spoken script and platform metadata. No image prompts needed.
 
 CONSTRAINTS:
 - Niche: ${CONFIG.niche}
 - Audience: Global English speakers, 18-45
-- Hook: First 3 seconds MUST stop scrolling (curiosity gap, shocking stat, controversial claim)
-- Script: 130-150 words exactly (= ~55 seconds at TTS pace)
+- Hook: First 3 seconds MUST stop scrolling (curiosity gap, shocking stat, controversial claim, bold question)
+- Script: ${CONFIG.scriptWordTarget} words (+/- 10). At TTS 1.05x pace this runs ~62 seconds, which qualifies the video for TikTok Creativity Program (>60s requirement).
 - Tone: Authoritative but conversational. Like a smart friend revealing a secret.
-- End: With a "follow for more" CTA disguised as a teaser
+- Structure: HOOK → shock/claim → 2-3 concrete examples or mini-story → payoff/insight → CTA
+- End: Soft CTA disguised as teaser ("follow for more X" or "comment your answer")
 - AVOID these used topics: ${usedTopics.slice(-30).join(" | ") || "none yet"}
 
-OUTPUT (strict JSON, no markdown):
+OUTPUT (strict JSON, no markdown, no commentary):
 {
   "topic": "Short specific title",
   "hook": "First sentence that stops scrolling",
-  "script": "Full 130-150 word script with hook included. Natural spoken English. No stage directions.",
-  "imagePrompts": [
-    "Cinematic image prompt 1 - vertical 9:16 - hyperrealistic - dramatic lighting",
-    "Cinematic image prompt 2",
-    "Cinematic image prompt 3", 
-    "Cinematic image prompt 4",
-    "Cinematic image prompt 5"
-  ],
+  "script": "Full ${CONFIG.scriptWordTarget}-word script with hook included. Natural spoken English. No stage directions. No asterisks. No emojis.",
   "platforms": {
     "tiktok": {
-      "caption": "Caption with line breaks",
-      "hashtags": ["#fyp", "#psychology", "#mindblown", "8-12 total"]
+      "caption": "Caption with line breaks (max 150 chars before hashtags)",
+      "hashtags": ["#fyp", "#psychology", "#mindblown", "8-12 total hashtags mixing popular and niche"]
     },
     "youtube": {
-      "title": "SEO title with brackets [Hook] - max 60 chars",
-      "description": "First 2 lines = hook. Then context. Then hashtags at end.",
-      "tags": ["10-15 SEO tags"]
+      "title": "SEO title with hook - max 60 chars",
+      "description": "First 2 lines = hook. Then 1-2 lines context. End with #Shorts and 3-5 relevant hashtags.",
+      "tags": ["10-15 SEO tags, lowercase, comma-friendly"]
     },
     "instagram": {
-      "caption": "Caption optimized for IG Reels",
-      "hashtags": ["#reels", "#psychology", "20-30 total mix popular and niche"]
+      "caption": "Caption optimized for IG Reels, under 150 chars before hashtags",
+      "hashtags": ["#reels", "#psychology", "20-30 total, mix popular and niche"]
     },
     "facebook": {
-      "caption": "Slightly longer caption, conversational, ends with question to drive comments"
+      "caption": "Slightly longer than other platforms, conversational tone, ends with a question to drive comments"
     }
   }
 }
@@ -149,77 +145,40 @@ CRITICAL: Return ONLY valid JSON. No \`\`\`json wrapper. No commentary.`;
     messages: [{ role: "user", content: prompt }],
   });
 
-  let text = response.content[0].text.trim();
-  // Strip markdown if Claude added it
-  text = text.replace(/^```(?:json)?\n?/i, "").replace(/\n?```$/, "");
-  
+  let text = response.content[0].text.trim()
+    .replace(/^```(?:json)?\n?/i, "")
+    .replace(/\n?```$/, "");
+
   const pkg = JSON.parse(text);
-  log(`Topic chosen: "${pkg.topic}"`);
-  log(`Script length: ${pkg.script.split(/\s+/).length} words`);
+  log(`  Topic: "${pkg.topic}"`);
+  log(`  Script: ${pkg.script.split(/\s+/).length} words`);
   return pkg;
 }
 
-// ─── STEP 2: DALL-E GENERATES IMAGES ───────────────────────────────────
-async function generateImages(prompts, sessionId) {
-  log(`Step 2/5: DALL-E 3 generating ${prompts.length} images...`);
-  
-  const imagePaths = [];
-  for (let i = 0; i < prompts.length; i++) {
-    log(`  Image ${i + 1}/${prompts.length}...`);
-    
-    const response = await openai.images.generate({
-      model: CONFIG.models.dalle,
-      prompt: prompts[i],
-      size: "1024x1792", // closest 9:16 ratio in DALL-E
-      quality: "hd",
-      n: 1,
-    });
-    
-    const url = response.data[0].url;
-    const dest = path.join(CONFIG.tempDir, `${sessionId}_img_${i}.png`);
-    await downloadFile(url, dest);
-    imagePaths.push(dest);
-    
-    // Resize to exact 1080x1920 for video
-    const resized = path.join(CONFIG.tempDir, `${sessionId}_img_${i}_resized.png`);
-    ffmpeg(`-i "${dest}" -vf "scale=${CONFIG.video.width}:${CONFIG.video.height}:force_original_aspect_ratio=increase,crop=${CONFIG.video.width}:${CONFIG.video.height}" "${resized}"`);
-    fs.unlinkSync(dest);
-    fs.renameSync(resized, dest);
-  }
-  
-  return imagePaths;
-}
-
-// ─── STEP 3: OPENAI TTS GENERATES VOICEOVER ────────────────────────────
+// ─── STEP 2: OPENAI TTS GENERATES VOICEOVER ────────────────────────────
 async function generateVoiceover(script, sessionId) {
-  log("Step 3/5: OpenAI TTS generating voiceover...");
-  
+  log("Step 2/4: OpenAI TTS generating voiceover...");
+
   const response = await openai.audio.speech.create({
     model: CONFIG.models.tts,
     voice: CONFIG.voice,
     input: script,
-    speed: 1.05, // Slightly faster for shorts pacing
+    speed: 1.05,
   });
-  
+
   const audioPath = path.join(CONFIG.tempDir, `${sessionId}_voice.mp3`);
   const buffer = Buffer.from(await response.arrayBuffer());
   fs.writeFileSync(audioPath, buffer);
-  
-  // Get duration with ffprobe
-  const duration = parseFloat(
-    execSync(`ffprobe -v error -show_entries format=duration -of csv=p=0 "${audioPath}"`)
-      .toString().trim()
-  );
-  
+
+  const duration = ffprobeDuration(audioPath);
   log(`  Voice duration: ${duration.toFixed(2)}s`);
   return { audioPath, duration };
 }
 
-// ─── STEP 4: GENERATE SUBTITLES (SRT) ──────────────────────────────────
-// Whisper API constraint: timestamp_granularities=["word"] REQUIRES
-// response_format="verbose_json" (SRT/VTT don't carry word-level timings).
-// So we fetch verbose_json and build tight SRT ourselves — 3 words per
-// cue for viral-style karaoke pacing that matches voiceover rhythm.
+// ─── STEP 3: GENERATE WORD-LEVEL SUBTITLES (SRT) ───────────────────────
+// Whisper constraint: `timestamp_granularities: ["word"]` REQUIRES
+// `response_format: "verbose_json"`. We then build SRT ourselves with
+// 3 words per cue for viral-style karaoke pacing.
 const WORDS_PER_CUE = 3;
 
 function formatSrtTime(sec) {
@@ -240,7 +199,8 @@ function buildSrtFromWords(words, wordsPerCue = WORDS_PER_CUE) {
     const chunk = words.slice(i, i + wordsPerCue);
     const start = chunk[0].start;
     const end = chunk[chunk.length - 1].end;
-    const text = chunk.map(w => w.word.trim()).join(" ");
+    // Uppercase for viral punch
+    const text = chunk.map(w => w.word.trim()).join(" ").toUpperCase();
     cues.push(
       `${cues.length + 1}\n${formatSrtTime(start)} --> ${formatSrtTime(end)}\n${text}\n`
     );
@@ -249,7 +209,7 @@ function buildSrtFromWords(words, wordsPerCue = WORDS_PER_CUE) {
 }
 
 async function generateSubtitles(audioPath, sessionId) {
-  log("Step 4/5: Generating subtitles via Whisper...");
+  log("Step 3/4: Whisper generating word-level SRT...");
 
   const transcription = await openai.audio.transcriptions.create({
     file: fs.createReadStream(audioPath),
@@ -265,48 +225,90 @@ async function generateSubtitles(audioPath, sessionId) {
   return srtPath;
 }
 
-// ─── STEP 5: ASSEMBLE VIDEO WITH FFMPEG ────────────────────────────────
-async function assembleVideo(imagePaths, audioPath, srtPath, audioDuration, sessionId, topic) {
-  log("Step 5/5: FFmpeg assembling final video...");
-  
-  const perImage = audioDuration / imagePaths.length;
-  log(`  ${imagePaths.length} images × ${perImage.toFixed(2)}s each`);
-  
-  // Build concat file with Ken Burns zoom effect on each image
-  const segments = [];
-  for (let i = 0; i < imagePaths.length; i++) {
-    const segPath = path.join(CONFIG.tempDir, `${sessionId}_seg_${i}.mp4`);
-    
-    // Ken Burns effect: zoom in slowly
-    ffmpeg(
-      `-loop 1 -i "${imagePaths[i]}" ` +
-      `-vf "zoompan=z='min(zoom+0.0015,1.2)':d=${Math.round(perImage * CONFIG.video.fps)}:s=${CONFIG.video.width}x${CONFIG.video.height}:fps=${CONFIG.video.fps}" ` +
-      `-t ${perImage} -c:v libx264 -pix_fmt yuv420p -preset fast "${segPath}"`
+// ─── STEP 4: ASSEMBLE VIDEO (BACKGROUND + VOICE + SUBTITLES) ───────────
+function pickRandomBackground() {
+  if (!fs.existsSync(CONFIG.backgroundDir)) {
+    throw new Error(
+      `Background directory missing: ${CONFIG.backgroundDir}\n` +
+      `Run: bash scripts/download-background.sh <youtube-url> <name>`
     );
-    segments.push(segPath);
   }
-  
-  // Concat all segments
-  const concatList = path.join(CONFIG.tempDir, `${sessionId}_concat.txt`);
-  fs.writeFileSync(concatList, segments.map(s => `file '${s}'`).join("\n"));
-  
-  const videoNoAudio = path.join(CONFIG.tempDir, `${sessionId}_video.mp4`);
-  ffmpeg(`-f concat -safe 0 -i "${concatList}" -c copy "${videoNoAudio}"`);
-  
-  // Add subtitle styling: bold, white with black outline, centered
-  const subtitleStyle = "FontName=Impact,FontSize=18,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,Outline=3,Shadow=1,Alignment=2,MarginV=300,Bold=1";
-  
-  // Final mix: video + audio + styled subtitles
+  const candidates = fs.readdirSync(CONFIG.backgroundDir)
+    .filter(f => /\.(mp4|mov|mkv|webm)$/i.test(f))
+    .map(f => path.join(CONFIG.backgroundDir, f));
+  if (candidates.length === 0) {
+    throw new Error(
+      `No background videos in ${CONFIG.backgroundDir}\n` +
+      `Run: bash scripts/download-background.sh <youtube-url> <name>`
+    );
+  }
+  return candidates[Math.floor(Math.random() * candidates.length)];
+}
+
+function prepareBackgroundSegment(audioDuration, sessionId) {
+  const bgPath = pickRandomBackground();
+  const bgDuration = ffprobeDuration(bgPath);
+
+  if (bgDuration < audioDuration + 1) {
+    throw new Error(
+      `Background ${path.basename(bgPath)} too short (${bgDuration.toFixed(1)}s) ` +
+      `for ${audioDuration.toFixed(1)}s voiceover. Use a clip of at least ` +
+      `${Math.ceil(audioDuration + 5)}s.`
+    );
+  }
+
+  // Pick random start so every video has different visuals.
+  const maxStart = Math.max(0, bgDuration - audioDuration - 0.5);
+  const start = Math.random() * maxStart;
+
+  const segPath = path.join(CONFIG.tempDir, `${sessionId}_bg.mp4`);
+  // scale+crop covers the frame (any input AR works), strip audio.
+  ffmpeg(
+    `-ss ${start.toFixed(2)} -i "${bgPath}" -t ${audioDuration.toFixed(2)} ` +
+    `-vf "scale=${CONFIG.video.width}:${CONFIG.video.height}:force_original_aspect_ratio=increase,crop=${CONFIG.video.width}:${CONFIG.video.height},fps=${CONFIG.video.fps}" ` +
+    `-an -c:v libx264 -pix_fmt yuv420p -preset fast "${segPath}"`
+  );
+  log(`  Background: ${path.basename(bgPath)} [${start.toFixed(1)}s → ${(start + audioDuration).toFixed(1)}s]`);
+  return segPath;
+}
+
+async function assembleVideo(audioPath, srtPath, audioDuration, sessionId, topic) {
+  log("Step 4/4: FFmpeg assembling final video...");
+
+  const bgSegment = prepareBackgroundSegment(audioDuration, sessionId);
+
+  // Viral subtitle style. Key facts:
+  //  - libass default PlayResY for SRT is 288. FontSize and MarginV are in
+  //    PlayResY units, scaled up to the actual video height at render time.
+  //  - FontSize=22 renders ~22/288*1920 = ~147px tall — big and punchy.
+  //  - Alignment=2 anchors to the bottom; MarginV is offset from bottom.
+  //  - MarginV=85 ≈ 30% of screen height from the bottom → classic viral
+  //    lower-third position. (MarginV > PlayResY pushes subs OFF-SCREEN —
+  //    the previous 250/300 values were invisible for this reason.)
+  const subtitleStyle = [
+    "FontName=Impact",
+    "FontSize=22",
+    "PrimaryColour=&H00FFFFFF",
+    "OutlineColour=&H00000000",
+    "BorderStyle=1",
+    "Outline=4",
+    "Shadow=2",
+    "Alignment=2",
+    "MarginV=85",
+    "Bold=1",
+    "Spacing=0.5",
+  ].join(",");
+
   const date = new Date().toISOString().split("T")[0];
   const safeTitle = topic.toLowerCase().replace(/[^a-z0-9]+/g, "-").substring(0, 50);
   const finalPath = path.join(CONFIG.outputDir, `${date}_${safeTitle}.mp4`);
-  
+
   ffmpeg(
-    `-i "${videoNoAudio}" -i "${audioPath}" ` +
+    `-i "${bgSegment}" -i "${audioPath}" ` +
     `-vf "subtitles='${srtPath}':force_style='${subtitleStyle}'" ` +
-    `-c:a aac -b:a 192k -shortest "${finalPath}"`
+    `-c:v libx264 -pix_fmt yuv420p -c:a aac -b:a 192k -shortest "${finalPath}"`
   );
-  
+
   log(`✓ Video ready: ${finalPath}`);
   return finalPath;
 }
@@ -320,8 +322,9 @@ function cleanup(sessionId) {
 }
 
 // ─── RESUME HELPERS ────────────────────────────────────────────────────
-// Resume mode re-uses already-paid artifacts (images + audio) from a prior
-// run that failed mid-pipeline. Saves ~$0.40 per retry.
+// Resume mode reuses paid artifacts (Claude pkg + TTS audio) from a prior
+// run that crashed mid-pipeline. Background + subtitles + FFmpeg are cheap
+// to recompute, so resume skips only the API-costly steps.
 function parseResumeArg() {
   for (const arg of process.argv.slice(2)) {
     if (arg === "--resume") return { mode: "auto" };
@@ -333,17 +336,17 @@ function parseResumeArg() {
 function findLatestSessionInTemp() {
   if (!fs.existsSync(CONFIG.tempDir)) return null;
   const candidates = fs.readdirSync(CONFIG.tempDir)
-    .filter(f => f.endsWith("_img_0.png"))
+    .filter(f => f.endsWith("_voice.mp3"))
     .map(f => ({
-      id: f.slice(0, -"_img_0.png".length),
+      id: f.slice(0, -"_voice.mp3".length),
       mtime: fs.statSync(path.join(CONFIG.tempDir, f)).mtime,
     }))
     .sort((a, b) => b.mtime - a.mtime);
   return candidates[0]?.id || null;
 }
 
-// When the package JSON was never saved (pre-fix runs), rebuild topic +
-// captions from the audio transcript with one cheap Claude call.
+// If pkg.json wasn't persisted (older runs), reconstruct topic + captions
+// from the audio transcript. Costs ~$0.01 instead of re-running TTS.
 async function reconstructPkgFromAudio(audioPath) {
   log("  No cached pkg.json — reconstructing from audio transcript...");
   const transcript = await openai.audio.transcriptions.create({
@@ -364,7 +367,7 @@ Return STRICT JSON (no markdown, no commentary):
 {
   "topic": "Short specific title derived from the transcript",
   "platforms": {
-    "tiktok":    { "caption": "...", "hashtags": ["#fyp","#psychology","..." ] },
+    "tiktok":    { "caption": "...", "hashtags": ["#fyp","#psychology","..."] },
     "youtube":   { "title": "SEO title max 60 chars", "description": "Hook-first description", "tags": ["10-15 SEO tags"] },
     "instagram": { "caption": "...", "hashtags": ["#reels", "20-30 mixed popularity"] },
     "facebook":  { "caption": "Conversational, ends with a question" }
@@ -376,11 +379,11 @@ Return STRICT JSON (no markdown, no commentary):
     max_tokens: 2000,
     messages: [{ role: "user", content: prompt }],
   });
-  let text = res.content[0].text.trim()
+  const text = res.content[0].text.trim()
     .replace(/^```(?:json)?\n?/i, "")
     .replace(/\n?```$/, "");
   const meta = JSON.parse(text);
-  return { topic: meta.topic, script, imagePrompts: [], platforms: meta.platforms };
+  return { topic: meta.topic, script, platforms: meta.platforms };
 }
 
 async function loadResumeState(resumeArg) {
@@ -389,24 +392,10 @@ async function loadResumeState(resumeArg) {
     : findLatestSessionInTemp();
   if (!sessionId) throw new Error("No resumable session found in temp/");
 
-  // Collect images
-  const imagePaths = [];
-  for (let i = 0; i < 10; i++) {
-    const p = path.join(CONFIG.tempDir, `${sessionId}_img_${i}.png`);
-    if (!fs.existsSync(p)) break;
-    imagePaths.push(p);
-  }
-  if (imagePaths.length === 0) throw new Error(`No images for session ${sessionId}`);
-
-  // Require audio
   const audioPath = path.join(CONFIG.tempDir, `${sessionId}_voice.mp3`);
   if (!fs.existsSync(audioPath)) throw new Error(`No audio for session ${sessionId}`);
-  const duration = parseFloat(
-    execSync(`ffprobe -v error -show_entries format=duration -of csv=p=0 "${audioPath}"`)
-      .toString().trim()
-  );
+  const duration = ffprobeDuration(audioPath);
 
-  // Load or reconstruct pkg
   const pkgPath = path.join(CONFIG.tempDir, `${sessionId}_pkg.json`);
   let pkg;
   if (fs.existsSync(pkgPath)) {
@@ -416,7 +405,7 @@ async function loadResumeState(resumeArg) {
     pkg = await reconstructPkgFromAudio(audioPath);
   }
 
-  return { sessionId, pkg, imagePaths, audioPath, duration };
+  return { sessionId, pkg, audioPath, duration };
 }
 
 // ─── MAIN ──────────────────────────────────────────────────────────────
@@ -424,40 +413,36 @@ async function main() {
   ensureDirs();
   const resumeArg = parseResumeArg();
 
-  let sessionId, pkg, imagePaths, audioPath, duration;
+  let sessionId, pkg, audioPath, duration;
 
   try {
     const history = loadHistory();
 
     if (resumeArg) {
       log(`════ RESUME MODE (${resumeArg.mode}) ════`);
-      ({ sessionId, pkg, imagePaths, audioPath, duration } = await loadResumeState(resumeArg));
-      log(`Resumed session ${sessionId}: topic="${pkg.topic}", ${imagePaths.length} images, ${duration.toFixed(2)}s audio`);
+      ({ sessionId, pkg, audioPath, duration } = await loadResumeState(resumeArg));
+      log(`Resumed session ${sessionId}: topic="${pkg.topic}", ${duration.toFixed(2)}s audio`);
     } else {
       sessionId = crypto.randomBytes(4).toString("hex");
       log(`════ NEW SESSION ${sessionId} ════`);
 
-      // 1. Claude: full content package
+      // 1. Claude
       pkg = await generateContentPackage(history.topics);
-      // Persist pkg early so a later failure can resume without paying Claude again
       fs.writeFileSync(
         path.join(CONFIG.tempDir, `${sessionId}_pkg.json`),
         JSON.stringify(pkg, null, 2)
       );
 
-      // 2. DALL-E: images
-      imagePaths = await generateImages(pkg.imagePrompts, sessionId);
-
-      // 3. OpenAI TTS: voice
+      // 2. TTS
       ({ audioPath, duration } = await generateVoiceover(pkg.script, sessionId));
     }
 
-    // 4. Whisper: subtitles
+    // 3. Whisper SRT
     const srtPath = await generateSubtitles(audioPath, sessionId);
 
-    // 5. FFmpeg: final video
-    const videoPath = await assembleVideo(imagePaths, audioPath, srtPath, duration, sessionId, pkg.topic);
-    
+    // 4. FFmpeg (bg + voice + subs)
+    const videoPath = await assembleVideo(audioPath, srtPath, duration, sessionId, pkg.topic);
+
     // Save metadata for publisher
     const metadataPath = videoPath.replace(".mp4", ".json");
     fs.writeFileSync(metadataPath, JSON.stringify({
@@ -470,16 +455,16 @@ async function main() {
       createdAt: new Date().toISOString(),
       published: { tiktok: false, youtube: false, instagram: false, facebook: false },
     }, null, 2));
-    
+
     // Update history
     history.topics.push(pkg.topic);
     history.videos.push({ sessionId, topic: pkg.topic, videoPath, createdAt: new Date().toISOString() });
     saveHistory(history);
-    
+
     cleanup(sessionId);
     log(`✓ SUCCESS — ready to publish: ${path.basename(videoPath)}`);
     log(`  Run: npm run publish -- ${path.basename(metadataPath)}`);
-    
+
     return { videoPath, metadataPath };
   } catch (err) {
     log(`✗ FAILED: ${err.message}`, "ERROR");
