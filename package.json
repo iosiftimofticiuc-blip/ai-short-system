@@ -1,0 +1,24 @@
+{
+  "name": "ai-shorts-system",
+  "version": "1.0.0",
+  "description": "Automated AI Short Videos for Psychology & Science Facts",
+  "main": "src/generate.js",
+  "scripts": {
+    "generate": "node src/generate.js",
+    "publish": "node src/publish.js",
+    "full": "node src/generate.js && node src/publish.js",
+    "test-claude": "node src/test/test-claude.js",
+    "test-openai": "node src/test/test-openai.js",
+    "test-ffmpeg": "node src/test/test-ffmpeg.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.32.0",
+    "openai": "^4.73.0",
+    "axios": "^1.7.9",
+    "dotenv": "^16.4.7",
+    "form-data": "^4.0.1"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
