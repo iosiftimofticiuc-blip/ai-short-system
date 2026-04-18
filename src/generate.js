@@ -216,18 +216,52 @@ async function generateVoiceover(script, sessionId) {
 }
 
 // ─── STEP 4: GENERATE SUBTITLES (SRT) ──────────────────────────────────
+// Whisper API constraint: timestamp_granularities=["word"] REQUIRES
+// response_format="verbose_json" (SRT/VTT don't carry word-level timings).
+// So we fetch verbose_json and build tight SRT ourselves — 3 words per
+// cue for viral-style karaoke pacing that matches voiceover rhythm.
+const WORDS_PER_CUE = 3;
+
+function formatSrtTime(sec) {
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = Math.floor(sec % 60);
+  const ms = Math.round((sec - Math.floor(sec)) * 1000);
+  const pad = (n, w = 2) => String(n).padStart(w, "0");
+  return `${pad(h)}:${pad(m)}:${pad(s)},${pad(ms, 3)}`;
+}
+
+function buildSrtFromWords(words, wordsPerCue = WORDS_PER_CUE) {
+  if (!Array.isArray(words) || words.length === 0) {
+    throw new Error("Whisper returned no word-level timestamps");
+  }
+  const cues = [];
+  for (let i = 0; i < words.length; i += wordsPerCue) {
+    const chunk = words.slice(i, i + wordsPerCue);
+    const start = chunk[0].start;
+    const end = chunk[chunk.length - 1].end;
+    const text = chunk.map(w => w.word.trim()).join(" ");
+    cues.push(
+      `${cues.length + 1}\n${formatSrtTime(start)} --> ${formatSrtTime(end)}\n${text}\n`
+    );
+  }
+  return cues.join("\n");
+}
+
 async function generateSubtitles(audioPath, sessionId) {
   log("Step 4/5: Generating subtitles via Whisper...");
-  
+
   const transcription = await openai.audio.transcriptions.create({
     file: fs.createReadStream(audioPath),
     model: "whisper-1",
-    response_format: "srt",
+    response_format: "verbose_json",
     timestamp_granularities: ["word"],
   });
-  
+
+  const srt = buildSrtFromWords(transcription.words);
   const srtPath = path.join(CONFIG.tempDir, `${sessionId}_subs.srt`);
-  fs.writeFileSync(srtPath, transcription);
+  fs.writeFileSync(srtPath, srt);
+  log(`  ${transcription.words.length} words -> ${Math.ceil(transcription.words.length / WORDS_PER_CUE)} cues`);
   return srtPath;
 }
 
